@@ -1,12 +1,29 @@
 #include <Windows.h>
 #include <tchar.h>
+#include <vector>
+#include <string>
 #ifdef _DEBUG
 #include <iostream>
 #endif
 
+//! DirectX関連インクルード
+#include <d3d12.h>
+#include <dxgi1_6.h>
+
+#pragma comment(lib,"d3d12.lib")
+#pragma comment(lib,"dxgi.lib")
+
+//! 追加インクルード
+#include<wrl/client.h>
+
 using namespace std;
+using namespace Microsoft::WRL;
 
 float g_windWidth = 1280, g_windHeight = 800;
+
+ComPtr<ID3D12Device> g_pDevice = nullptr;
+ComPtr<IDXGIFactory6> g_pDxgiFactory = nullptr;
+ComPtr<IDXGISwapChain4> g_pSwapchain = nullptr;
 
 //----------------------------------------------------------------------------
 //デバック用関数
@@ -21,6 +38,70 @@ void DebugOut(const char* format, ...)
 	va_end(valist);
 #endif // _DEBUG
 }
+
+//----------------------------------------------------------------------------
+//Direct3D12
+//----------------------------------------------------------------------------
+
+bool InitDirect3D()
+{
+	if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(g_pDxgiFactory.GetAddressOf()))))
+		return false;
+
+	//アダプターを指定する
+	vector<ComPtr<IDXGIAdapter>> adapters;
+
+	ComPtr<IDXGIAdapter> tempAdapter = nullptr;
+
+	for (int i = 0; g_pDxgiFactory->EnumAdapters(i, tempAdapter.GetAddressOf()) != DXGI_ERROR_NOT_FOUND; i++)
+	{
+		adapters.push_back(tempAdapter);
+	}
+
+	for (auto adamp: adapters)
+	{
+		DXGI_ADAPTER_DESC adesc = {};
+		adamp->GetDesc(&adesc);
+
+		wstring strDesc = adesc.Description;
+
+		if (strDesc.find(L"NVIDIA") != string::npos)
+		{
+			tempAdapter = adamp;
+			break;
+		}
+	}
+
+	//Direct3Dデバイスの作成
+	const D3D_FEATURE_LEVEL levels[] =
+	{
+		D3D_FEATURE_LEVEL_12_0,
+		D3D_FEATURE_LEVEL_12_1,
+		D3D_FEATURE_LEVEL_11_0,
+		D3D_FEATURE_LEVEL_11_1,
+	};
+
+	D3D_FEATURE_LEVEL featurelevel;
+
+	for (auto lv : levels)
+	{
+		if (SUCCEEDED(D3D12CreateDevice(tempAdapter.Get(), lv, IID_PPV_ARGS(g_pDevice.GetAddressOf()))))
+		{
+			featurelevel = lv;
+			break;
+		}
+	}
+
+	//作成失敗
+	if (g_pDevice == nullptr)
+	{
+		return false;
+	}
+
+	return true;
+}
+
+
 
 //----------------------------------------------------------------------------
 //ウィンドウ生成
@@ -86,6 +167,11 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
 		nullptr);
 
 	ShowWindow(hWnd, SW_SHOW);
+
+	if (InitDirect3D())
+	{
+		
+	}
 
 	MSG msg = {};
 
