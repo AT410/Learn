@@ -19,11 +19,19 @@
 using namespace std;
 using namespace Microsoft::WRL;
 
-float g_windWidth = 1280, g_windHeight = 800;
+const LONG g_windWidth = 1280, g_windHeight = 800;
 
 ComPtr<ID3D12Device> g_pDevice = nullptr;
 ComPtr<IDXGIFactory6> g_pDxgiFactory = nullptr;
 ComPtr<IDXGISwapChain4> g_pSwapchain = nullptr;
+
+//? コマンドリスト
+ComPtr<ID3D12GraphicsCommandList> g_pCmdList = nullptr;
+ComPtr<ID3D12CommandAllocator> g_pCmdAllocator = nullptr;
+ComPtr<ID3D12CommandQueue> g_pCmdQueue = nullptr;
+
+//? ディスクリプタ
+ComPtr<ID3D12DescriptorHeap> g_prtvHeaps = nullptr;
 
 //----------------------------------------------------------------------------
 //デバック用関数
@@ -101,7 +109,143 @@ bool InitDirect3D()
 	return true;
 }
 
+//! 画面色のクリア
+bool ClearWindow(HWND hwnd)
+{
+	//コマンドリストの作成とコマンドアロケータ
+	HRESULT result = g_pDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&g_pCmdAllocator));
 
+	if (result != S_OK)
+		return false;
+
+	result = g_pDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_pCmdAllocator.Get(),nullptr,IID_PPV_ARGS(&g_pCmdList));
+	if (result != S_OK)
+		return false;
+
+	//コマンドキューの作成
+	D3D12_COMMAND_QUEUE_DESC cmdQueueDesc = {};
+
+	//タイムアウト無し
+	cmdQueueDesc.Flags = D3D12_COMMAND_QUEUE_FLAGS::D3D12_COMMAND_QUEUE_FLAG_NONE;
+
+	//アダプターを一つ以上使わない場合は０で良い
+	cmdQueueDesc.NodeMask = 0;
+
+	//プライオリティは特に設定なし
+	cmdQueueDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+
+	//コマンドリストに合わせる
+	cmdQueueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+
+	//キューを作成
+	result = g_pDevice->CreateCommandQueue(&cmdQueueDesc, IID_PPV_ARGS(&g_pCmdQueue));
+	if (result != S_OK)
+		return false;
+
+	//スワップチェーンを作成
+	DXGI_SWAP_CHAIN_DESC1 swapchainDesc = {};
+
+	swapchainDesc.Width = g_windWidth;
+	swapchainDesc.Height = g_windHeight;
+	swapchainDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	swapchainDesc.Stereo = false;
+	swapchainDesc.SampleDesc.Count = 1;
+	swapchainDesc.SampleDesc.Quality = 0;
+	swapchainDesc.BufferUsage = DXGI_USAGE_BACK_BUFFER;
+	swapchainDesc.BufferCount = 2;
+
+	//バッファは伸び縮み可能
+	swapchainDesc.Scaling = DXGI_SCALING_STRETCH;
+
+	//フリップ後は速やかに破棄
+	swapchainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+
+	//特に指定なし
+	swapchainDesc.AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED;
+
+	//ウィンドウ⇔フルスクリーン切り替え可能
+	swapchainDesc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+
+	result = g_pDxgiFactory->CreateSwapChainForHwnd(g_pCmdQueue.Get(), hwnd, &swapchainDesc, nullptr, nullptr, (IDXGISwapChain1**)g_pSwapchain.GetAddressOf());
+	if (result != S_OK)
+		return false;
+
+	//TODO 学習メモ
+	/*
+		2021/01/29 0:58
+		スワップチェイン用のバッファ作成まで完了。
+		次の目標＝＞レンダーターゲットビューの作成をする
+	*/
+	
+	//ディスクリプタヒープを作成
+	D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
+	heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE::D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+	heapDesc.NodeMask = 0;
+	heapDesc.NumDescriptors = 2;//表裏の二つ
+	heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAGS::D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+
+	result = g_pDevice->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&g_prtvHeaps));
+
+	//スワップチェーンと紐づける
+	DXGI_SWAP_CHAIN_DESC swcDesc = {};
+	result = g_pSwapchain->GetDesc(&swcDesc);
+
+	vector<ID3D12Resource*> _backBuffers(swcDesc.BufferCount);
+
+	//先頭のアドレスを得る
+	D3D12_CPU_DESCRIPTOR_HANDLE handle = g_prtvHeaps->GetCPUDescriptorHandleForHeapStart();
+
+	for (int idx = 0; idx < swcDesc.BufferCount; idx++)
+	{
+		result = g_pSwapchain->GetBuffer(idx, IID_PPV_ARGS(&_backBuffers[idx]));
+
+		//レンダーターゲットビューを生成する
+		g_pDevice->CreateRenderTargetView(_backBuffers[idx], nullptr, handle);
+
+		//ポインターをずらす
+		handle.ptr += g_pDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+	}
+
+	return true;
+}
+
+void Update()
+{
+	HRESULT result = g_pCmdAllocator->Reset();
+
+	auto bbIdx = g_pSwapchain->GetCurrentBackBufferIndex();
+
+	auto rtvH = g_prtvHeaps->GetCPUDescriptorHandleForHeapStart();
+	rtvH.ptr += bbIdx * g_pDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+	g_pCmdList->OMSetRenderTargets(1, &rtvH, true, nullptr);
+
+	//画面クリア
+	const float clearColor[] = { 1.0f,1.0f,0.0f,1.0f };//黄色
+	g_pCmdList->ClearRenderTargetView(rtvH, clearColor, 0, nullptr);
+
+	//命令をクローズ
+	g_pCmdList->Close();
+
+
+	//コマンドリストの実行
+	ID3D12CommandList* _cmdLists[] = { g_pCmdList.Get() };
+
+	g_pCmdQueue->ExecuteCommandLists(1, _cmdLists);
+
+	//キューをクリア
+	g_pCmdAllocator->Reset();
+	g_pCmdList->Reset(g_pCmdAllocator.Get(), nullptr);
+
+	//画面のスワップ
+	g_pSwapchain->Present(1, 0);
+
+	//TODO 学習メモ
+	/*
+		2021/02/01
+		画面クリアまで、完了
+		90P＝＞エラー処理を作成
+	*/
+}
 
 //----------------------------------------------------------------------------
 //ウィンドウ生成
@@ -170,13 +314,15 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
 
 	if (InitDirect3D())
 	{
-		
+		ClearWindow(hWnd);
 	}
 
 	MSG msg = {};
 
 	while (true)
 	{
+		Update();
+
 		if (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE))
 		{
 			TranslateMessage(&msg);
