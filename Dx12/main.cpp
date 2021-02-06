@@ -6,6 +6,12 @@
 #include <iostream>
 #endif
 
+/*
+TODO 進行度
+画面クリア処理を完了しました。
+97P
+*/
+
 //! DirectX関連インクルード
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -25,6 +31,8 @@ ComPtr<ID3D12Device> g_pDevice = nullptr;
 ComPtr<IDXGIFactory6> g_pDxgiFactory = nullptr;
 ComPtr<IDXGISwapChain4> g_pSwapchain = nullptr;
 
+vector<ComPtr<ID3D12Resource>> g_pbackBuffers;
+
 //? コマンドリスト
 ComPtr<ID3D12GraphicsCommandList> g_pCmdList = nullptr;
 ComPtr<ID3D12CommandAllocator> g_pCmdAllocator = nullptr;
@@ -33,6 +41,9 @@ ComPtr<ID3D12CommandQueue> g_pCmdQueue = nullptr;
 //? ディスクリプタ
 ComPtr<ID3D12DescriptorHeap> g_prtvHeaps = nullptr;
 
+//? フェンス
+ComPtr<ID3D12Fence> g_pFence = nullptr;
+UINT64 g_fenceVal = 0;
 //----------------------------------------------------------------------------
 //デバック用関数
 //----------------------------------------------------------------------------
@@ -47,14 +58,32 @@ void DebugOut(const char* format, ...)
 #endif // _DEBUG
 }
 
+//デバックレイヤー
+void EnableDebugLayer()
+{
+	ID3D12Debug* debugLayer = nullptr;
+	auto result = D3D12GetDebugInterface(IID_PPV_ARGS(&debugLayer));
+
+	debugLayer->EnableDebugLayer();//デバックレイヤーを有効化
+	debugLayer->Release();//有効化したらインターフェイスを解放
+}
+
 //----------------------------------------------------------------------------
 //Direct3D12
 //----------------------------------------------------------------------------
 
 bool InitDirect3D()
 {
+#ifdef _DEBUG
+	//デバックレイヤーを有効化
+	EnableDebugLayer();
+
+	if (FAILED(CreateDXGIFactory2(DXGI_CREATE_FACTORY_DEBUG,IID_PPV_ARGS(g_pDxgiFactory.GetAddressOf()))))
+		return false;
+#else
 	if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(g_pDxgiFactory.GetAddressOf()))))
 		return false;
+#endif // _DEBUG
 
 	//アダプターを指定する
 	vector<ComPtr<IDXGIAdapter>> adapters;
@@ -190,21 +219,23 @@ bool ClearWindow(HWND hwnd)
 	DXGI_SWAP_CHAIN_DESC swcDesc = {};
 	result = g_pSwapchain->GetDesc(&swcDesc);
 
-	vector<ID3D12Resource*> _backBuffers(swcDesc.BufferCount);
+	g_pbackBuffers.resize(swcDesc.BufferCount);
 
 	//先頭のアドレスを得る
 	D3D12_CPU_DESCRIPTOR_HANDLE handle = g_prtvHeaps->GetCPUDescriptorHandleForHeapStart();
 
-	for (int idx = 0; idx < swcDesc.BufferCount; idx++)
+	for (UINT idx = 0; idx < swcDesc.BufferCount; idx++)
 	{
-		result = g_pSwapchain->GetBuffer(idx, IID_PPV_ARGS(&_backBuffers[idx]));
+		result = g_pSwapchain->GetBuffer(idx, IID_PPV_ARGS(&g_pbackBuffers[idx]));
 
 		//レンダーターゲットビューを生成する
-		g_pDevice->CreateRenderTargetView(_backBuffers[idx], nullptr, handle);
+		g_pDevice->CreateRenderTargetView(g_pbackBuffers[idx].Get(), nullptr, handle);
 
 		//ポインターをずらす
 		handle.ptr += g_pDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 	}
+
+	result = g_pDevice->CreateFence(g_fenceVal, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_pFence));
 
 	return true;
 }
@@ -215,6 +246,19 @@ void Update()
 
 	auto bbIdx = g_pSwapchain->GetCurrentBackBufferIndex();
 
+	D3D12_RESOURCE_BARRIER BarrierDesc = {};
+
+	BarrierDesc.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;//遷移
+	BarrierDesc.Flags = D3D12_RESOURCE_BARRIER_FLAGS::D3D12_RESOURCE_BARRIER_FLAG_NONE;//指定なし
+	BarrierDesc.Transition.pResource = g_pbackBuffers[bbIdx].Get();
+	BarrierDesc.Transition.Subresource = 0;
+
+	BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATES::D3D12_RESOURCE_STATE_PRESENT;//直前PRESENT状態
+	BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATES::D3D12_RESOURCE_STATE_RENDER_TARGET;//今からレンダーターゲット状態
+
+	g_pCmdList->ResourceBarrier(1, &BarrierDesc);//バリア指定実行
+
+	//レンダーターゲットを指定
 	auto rtvH = g_prtvHeaps->GetCPUDescriptorHandleForHeapStart();
 	rtvH.ptr += bbIdx * g_pDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 	g_pCmdList->OMSetRenderTargets(1, &rtvH, true, nullptr);
@@ -222,6 +266,10 @@ void Update()
 	//画面クリア
 	const float clearColor[] = { 1.0f,1.0f,0.0f,1.0f };//黄色
 	g_pCmdList->ClearRenderTargetView(rtvH, clearColor, 0, nullptr);
+
+	BarrierDesc.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+	BarrierDesc.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+	g_pCmdList->ResourceBarrier(1, &BarrierDesc);
 
 	//命令をクローズ
 	g_pCmdList->Close();
@@ -231,6 +279,22 @@ void Update()
 	ID3D12CommandList* _cmdLists[] = { g_pCmdList.Get() };
 
 	g_pCmdQueue->ExecuteCommandLists(1, _cmdLists);
+
+	g_pCmdQueue->Signal(g_pFence.Get(), ++g_fenceVal);
+	
+	if (g_pFence->GetCompletedValue() != g_fenceVal)
+	{
+		//イベントハンドルの取得
+		auto event = CreateEvent(nullptr, false, false, nullptr);
+
+		g_pFence->SetEventOnCompletion(g_fenceVal, event);
+
+		//イベントが発生するまで待つ
+		WaitForSingleObject(event, INFINITE);
+
+		//イベントをハンドルを閉じる
+		CloseHandle(event);
+	}
 
 	//キューをクリア
 	g_pCmdAllocator->Reset();
