@@ -15,6 +15,7 @@ TODO 進行度
 //! DirectX関連インクルード
 #include <d3d12.h>
 #include <dxgi1_6.h>
+#include <DirectXMath.h>
 
 #pragma comment(lib,"d3d12.lib")
 #pragma comment(lib,"dxgi.lib")
@@ -24,6 +25,7 @@ TODO 進行度
 
 using namespace std;
 using namespace Microsoft::WRL;
+using namespace DirectX;
 
 const LONG g_windWidth = 1280, g_windHeight = 800;
 
@@ -44,6 +46,15 @@ ComPtr<ID3D12DescriptorHeap> g_prtvHeaps = nullptr;
 //? フェンス
 ComPtr<ID3D12Fence> g_pFence = nullptr;
 UINT64 g_fenceVal = 0;
+
+//? ベクトル構造体
+XMFLOAT3 vertices[] =
+{
+	{-1.0f,-1.0f,0.0f},
+	{-1.0f,1.0f,0.0f} ,
+	{1.0f,-1.0f,0.0f}
+};
+
 //----------------------------------------------------------------------------
 //デバック用関数
 //----------------------------------------------------------------------------
